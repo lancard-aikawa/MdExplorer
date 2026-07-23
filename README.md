@@ -10,7 +10,7 @@
 **動作要件:** Node.js 18 以上 / pnpm
 
 ```bash
-git clone https://github.com/yourname/fastmd-explorer.git
+git clone https://github.com/lancard-aikawa/fastmd-explorer.git
 cd fastmd-explorer
 pnpm install
 ```

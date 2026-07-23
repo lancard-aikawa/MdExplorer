@@ -15,19 +15,6 @@
     "build:patch": "node scripts/patch-subsystem.mjs dist/fastmd-explorer.exe",
     "build": "pnpm run build:bundle && pnpm run build:exe && pnpm run build:patch"
   },
-  "pkg": {
-    "assets": [
-      "public/**/*",
-      "node_modules/mermaid/dist/mermaid.min.js",
-      "node_modules/cytoscape/dist/cytoscape.min.js",
-      "node_modules/highlight.js/styles/github.css",
-      "node_modules/highlight.js/styles/github-dark.css",
-      "node_modules/katex/dist/katex.min.css",
-      "node_modules/katex/dist/fonts/*.woff2",
-      "src/picker.ps1",
-      "mdexplorer.config.json.sample"
-    ]
-  },
   "dependencies": {
     "cytoscape": "^3.33.4",
     "express": "^4.22.2",

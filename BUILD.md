@@ -64,6 +64,13 @@ pnpm run build
   1 回目のビルドのみ、pkg が `node22-win-x64` のベースバイナリを取得するため時間がかかります
   （以降は `PKG_CACHE_PATH`、既定で `~/.pkg-cache` にキャッシュ）。
 
+- **同梱アセットの定義は `scripts/build-bundle.mjs` が唯一の正**
+  exe に同梱するアセット一覧は [`scripts/build-bundle.mjs`](scripts/build-bundle.mjs) が
+  `src/.pkgrc.json` として生成し、pkg が entry の隣から auto-discover します。
+  `/vendor` で配信する依存を追加したら**必ずここに追記**してください
+  （漏れると dev では動くのに exe だけ 404 になります）。
+  `package.json` の `pkg.assets` は pkg に読まれないため置いていません。
+
 - **`Cannot resolve 'mod'` という警告**
   Express の view engine 由来の警告で、このアプリでは無害です（`res.render` を使っていない）。
 
