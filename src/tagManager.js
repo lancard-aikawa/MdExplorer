@@ -1,14 +1,14 @@
 import { readFile } from 'fs/promises';
 import { join, normalize } from 'path';
-import { homedir } from 'os';
 import { createHash } from 'crypto';
 import { writeJsonAtomic } from './jsonStore.js';
+import { appHomePath } from './appHome.js';
 
 // Tags are stored in ~/.mdexplorer/tags/{hash}.json
 // where hash = SHA1 of the normalized root path (lowercase, forward slashes)
 // This keeps user data folders clean.
 
-const TAGS_DIR = join(homedir(), '.mdexplorer', 'tags');
+const TAGS_DIR = appHomePath('tags');
 
 // 注: case-sensitive な環境では /docs と /Docs が同じファイルを共有するが、
 // ここは意図的に変えていない。ハッシュを変えると既存ユーザーのタグが

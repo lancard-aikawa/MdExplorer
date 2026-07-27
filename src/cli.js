@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { join, resolve } from 'path';
-import { networkInterfaces, tmpdir, homedir } from 'os';
+import { networkInterfaces, tmpdir } from 'os';
 import { existsSync, statSync, createWriteStream } from 'fs';
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { createServer } from './server.js';
 import { loadConfig, loadLocalConfig, serverConfig, getConfigPaths, getConfig } from './configManager.js';
+import { appHomePath } from './appHome.js';
 
 // window モード: 単体ウィンドウ (ブラウザのアプリモード) で起動し、
 // ウィンドウを閉じるとプロセスごと終了する。
@@ -130,7 +131,7 @@ function launchAppWindow(url, bounds) {
   //
   // --disable-sync: 専用プロファイルに個人データが同期されるのを防ぐ
   //   (Edge の「同期しています」通知も出なくなる)。
-  const profileDir = join(homedir(), '.mdexplorer', 'browser-profile');
+  const profileDir = appHomePath('browser-profile');
   const args = [
     `--app=${url}`,
     `--user-data-dir=${profileDir}`,

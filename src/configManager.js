@@ -1,11 +1,10 @@
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { homedir } from 'os';
 import { writeJsonAtomic } from './jsonStore.js';
+import { appHomePath } from './appHome.js';
 
 // Global user data (history, last folder)
-const GLOBAL_DIR  = join(homedir(), '.mdexplorer');
-const GLOBAL_FILE = join(GLOBAL_DIR, 'config.json');
+const GLOBAL_FILE = appHomePath('config.json');
 
 // Local project config (port, network, theme) — searched in cwd
 const LOCAL_FILE = join(process.cwd(), 'mdexplorer.config.json');

@@ -9,6 +9,9 @@
   },
   "scripts": {
     "test": "node --test",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:all": "pnpm run test && pnpm run test:e2e",
     "start": "node src/cli.js",
     "dev": "node --watch src/cli.js",
     "build:bundle": "node scripts/build-bundle.mjs",
@@ -29,6 +32,7 @@
     "open": "^10.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@yao-pkg/pkg": "^6.19.0",
     "esbuild": "^0.28.0"
   }

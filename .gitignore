@@ -9,3 +9,8 @@ src/_bundle.cjs
 src/.pkgrc.json
 .hintrc
 .playwright-mcp/
+# Playwright (E2E) の実行成果物
+test-results/
+playwright-report/
+blob-report/
+.cache/

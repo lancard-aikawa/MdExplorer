@@ -1,8 +1,8 @@
 import { readdir, stat, readlink, readFile, writeFile, mkdir, unlink } from 'fs/promises';
 import { join, relative, extname, resolve, dirname } from 'path';
-import { homedir } from 'os';
 import { createHash } from 'crypto';
 import { isInside } from './pathGuard.js';
+import { appHomePath } from './appHome.js';
 
 // In-memory file tree cache keyed by root path
 // Entry: { mtime: number, tree: TreeNode | null }
@@ -26,7 +26,7 @@ export const HTML_EXTS  = new Set(['.html', '.htm']);
 // ツリーノードの形が変わったら bump する。旧キャッシュを無効化して再スキャンさせる。
 // v2: html ファイル (type:'html' / hasHtml) 対応で追加
 const SCHEMA_VERSION = 2;
-const TREE_CACHE_DIR = join(homedir(), '.mdexplorer', 'tree-cache');
+const TREE_CACHE_DIR = appHomePath('tree-cache');
 
 function diskCachePath(rootPath) {
   // 大文字小文字を潰してよいのはパスが case-insensitive な環境だけ。
