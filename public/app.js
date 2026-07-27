@@ -272,7 +272,8 @@ async function openFolder(rawPath) {
     state.activeTabPath = saved?.activeTabPath ?? null;
     renderTabBar();
 
-    if (res.warnings?.length) showWarning(res.warnings.join('<br>'), 'warn');
+    // 警告文にはスキャンしたフォルダ内のパス (symlink 名など) が入るため個別にエスケープ
+    if (res.warnings?.length) showWarningHtml(res.warnings.map(escHtml).join('<br>'), 'warn');
 
     await refreshTree();
 
@@ -571,8 +572,8 @@ async function refreshTree() {
     state.tags = data.tags ?? {};
 
     if (data.warnings?.length) {
-      const extra = data.warnings.join('<br>');
-      showWarning(warningBar.innerHTML ? warningBar.innerHTML + '<br>' + extra : extra, 'warn');
+      const extra = data.warnings.map(escHtml).join('<br>');
+      showWarningHtml(warningBar.innerHTML ? warningBar.innerHTML + '<br>' + extra : extra, 'warn');
     }
 
     if (!data.tree) {
@@ -1353,28 +1354,39 @@ function attachMermaidZoom(container) {
       applyTransform();
     }, { passive: false });
 
-    container.addEventListener('mousedown', (e) => {
+    // ドラッグ追従は window ではなく pointer capture で行う。
+    // window にリスナーを張ると、プレビューを描き替えるたびに古いコンテナを
+    // 掴んだリスナーが外れずに溜まり続ける (ファイルを開くたびに 2 個ずつ増える)。
+    // コンテナ自身に張れば、要素が捨てられた時点で一緒に回収される。
+    container.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       dragging = true;
       startX = e.clientX; startY = e.clientY;
       startPanX = panX; startPanY = panY;
       container.style.cursor = 'grabbing';
+      // capture できなくてもドラッグ自体は成立させる (コンテナ外へ出ると
+      // 追従が切れるだけ)。合成イベント等で pointerId が無効だと throw する。
+      try { container.setPointerCapture(e.pointerId); } catch { /* ignore */ }
       e.preventDefault();
     });
 
-    const onMouseMove = (e) => {
+    container.addEventListener('pointermove', (e) => {
       if (!dragging) return;
       panX = startPanX + (e.clientX - startX);
       panY = startPanY + (e.clientY - startY);
       applyTransform();
-    };
-    const onMouseUp = () => {
+    });
+
+    const endDrag = (e) => {
       if (!dragging) return;
       dragging = false;
       container.style.cursor = 'grab';
+      if (e.pointerId != null && container.hasPointerCapture?.(e.pointerId)) {
+        container.releasePointerCapture(e.pointerId);
+      }
     };
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+    container.addEventListener('pointerup', endDrag);
+    container.addEventListener('pointercancel', endDrag);
 
     const controls = document.createElement('div');
     controls.className = 'mermaid-controls';
@@ -1822,7 +1834,16 @@ function fixLocalLinks() {
       if (/\.(md|markdown|mdown|mkd|html?)$/i.test(cleanHref)) {
         const baseParts = (state.activeTabPath ?? '').replace(/\\/g, '/').split('/');
         baseParts.pop();
-        const resolved = [...baseParts, ...cleanHref.split('/')].join('/');
+        // '..' / '.' をここで畳む。畳まないと relativePath が 'dir/../x.md' の
+        // まま残り、タグの照合やツリーのアクティブ表示が一致しなくなる
+        // (サーバは normalize するので開けはするが、状態がずれる)。
+        const parts = [...baseParts];
+        for (const seg of cleanHref.split('/')) {
+          if (seg === '' || seg === '.') continue;
+          if (seg === '..') { if (parts.length > 1) parts.pop(); }
+          else parts.push(seg);
+        }
+        const resolved = parts.join('/');
         const sep = state.currentRoot?.includes('\\') ? '\\' : '/';
         const resolvedNative = resolved.replace(/\//g, sep);
         const rel = resolved.replace((state.currentRoot ?? '').replace(/\\/g, '/') + '/', '');
@@ -1917,14 +1938,13 @@ function applyEditorCmd(cmd) {
   const linePrefix = (prefix) => {
     // Apply prefix to each selected line
     const lineStart = before.lastIndexOf('\n') + 1;
-    const fullLine  = ta.value.slice(lineStart, end);
     const lines     = (before.slice(lineStart) + sel).split('\n');
     const prefixed  = lines.map((l, i) => {
       if (cmd === 'ol') return `${i + 1}. ${l}`;
       return prefix + l;
     }).join('\n');
     newVal   = ta.value.slice(0, lineStart) + prefixed + after;
-    newStart = lineStart + prefixed.length - (sel.length ? 0 : 0);
+    newStart = lineStart + prefixed.length;
     newEnd   = newStart;
   };
 
@@ -2446,8 +2466,8 @@ function toRelative(absPath) {
   return absPath.startsWith(root) ? absPath.slice(root.length).replace(/^[/\\]/, '') : absPath;
 }
 
-function showNewItemInput(parentUl, placeholder) {
-  const isFile = placeholder.includes('.md');
+/** ツリー内にインライン入力欄を出して名前を受け取る。isFile で .md サフィックス表示を切替える。 */
+function showNewItemInput(parentUl, { isFile, placeholder }) {
   return new Promise((resolve) => {
     const li = document.createElement('li');
     const wrap = document.createElement('span');
@@ -2455,7 +2475,7 @@ function showNewItemInput(parentUl, placeholder) {
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'inline-input';
-    input.placeholder = isFile ? 'ファイル名' : placeholder;
+    input.placeholder = placeholder;
     wrap.appendChild(input);
     if (isFile) {
       const ext = document.createElement('span');
@@ -2544,7 +2564,7 @@ async function fsCreateFile(dirPath) {
   if (childUl?.style.display === 'none') childUl.previousElementSibling?.click();
   const targetUl = childUl ?? fileTree.querySelector('.tree-list');
   if (!targetUl) return;
-  const name = await showNewItemInput(targetUl, 'ファイル名.md');
+  const name = await showNewItemInput(targetUl, { isFile: true, placeholder: 'ファイル名' });
   if (!name) return;
   try {
     const res = await post('/api/fs/file', { dir: dirPath, name });
@@ -2563,7 +2583,7 @@ async function fsCreateFolder(dirPath) {
   if (childUl?.style.display === 'none') childUl.previousElementSibling?.click();
   const targetUl = childUl ?? fileTree.querySelector('.tree-list');
   if (!targetUl) return;
-  const name = await showNewItemInput(targetUl, 'フォルダ名');
+  const name = await showNewItemInput(targetUl, { isFile: false, placeholder: 'フォルダ名' });
   if (!name) return;
   try {
     const { path: newFolderPath } = await post('/api/fs/folder', { dir: dirPath, name });
@@ -2600,16 +2620,18 @@ async function fsRename(oldPath, isFile, nameEl) {
         delete state.tags[key];
       }
     }
+    // String.replace は置換文字列側の $& / $1 を特殊扱いするため、
+    // '$' を含むパスだと壊れる。ここは前方一致の付け替えなので slice で行う。
+    const isUnder = (p) => p === oldPath || p?.startsWith(oldPath + '\\') || p?.startsWith(oldPath + '/');
+    const rebase  = (p) => newPath + p.slice(oldPath.length);
+
     state.tabs.forEach((t) => {
-      if (t.path === oldPath || t.path.startsWith(oldPath + '\\') || t.path.startsWith(oldPath + '/')) {
-        const updated = t.path.replace(oldPath, newPath);
-        t.path = updated; t.name = updated.split(/[/\\]/).pop(); t.relativePath = toRelative(updated);
-      }
+      if (!isUnder(t.path)) return;
+      const updated = rebase(t.path);
+      t.path = updated; t.name = updated.split(/[/\\]/).pop(); t.relativePath = toRelative(updated);
     });
-    if (state.activeTabPath === oldPath ||
-        state.activeTabPath?.startsWith(oldPath + '\\') ||
-        state.activeTabPath?.startsWith(oldPath + '/')) {
-      state.activeTabPath = state.activeTabPath.replace(oldPath, newPath);
+    if (isUnder(state.activeTabPath)) {
+      state.activeTabPath = rebase(state.activeTabPath);
     }
     renderTabBar();
     await refreshTree();
@@ -2753,7 +2775,20 @@ function updateTreeActiveState() {
   });
 }
 
-function showWarning(html, type) {
+/**
+ * 警告バーに「テキスト」を表示する (既定)。
+ *
+ * 呼び出しの大半は `エラー: ${err.message}` の形で、message にはサーバ側の
+ * fs エラー由来のファイル名がそのまま入る。既定をエスケープにしておかないと
+ * 「<img onerror=...> という名前のファイルを作る」だけで HTML を注入できる。
+ * HTML を意図して渡したい場合だけ showWarningHtml を使う。
+ */
+function showWarning(text, type) {
+  showWarningHtml(text ? escHtml(text) : text, type);
+}
+
+/** HTML をそのまま流し込む版。渡す側が個々の断片をエスケープすること。 */
+function showWarningHtml(html, type) {
   if (!html) { warningBar.classList.add('hidden'); warningBar.innerHTML = ''; return; }
   warningBar.className = type === 'error' ? 'bar-error' : 'bar-warn';
   warningBar.innerHTML = html + '<button class="warning-close" title="閉じる">✕</button>';
@@ -3315,7 +3350,7 @@ function initDragDrop() {
       folderInput.focus();
       folderInput.select();
       showWarning(
-        `"${escHtml(name)}" のフルパスが取得できませんでした（ブラウザの制限）。`
+        `"${name}" のフルパスが取得できませんでした（ブラウザの制限）。`
         + ` パス入力欄を補完して Enter で開いてください。`,
         'warn'
       );
@@ -3375,7 +3410,7 @@ function initDragDrop() {
         editor.selectionStart = editor.selectionEnd = pos + ins.length;
         editor.dispatchEvent(new Event('input'));
       } catch (err) {
-        showWarning(`画像アップロードエラー: ${escHtml(err.message)}`, 'error');
+        showWarning(`画像アップロードエラー: ${err.message}`, 'error');
       }
     }
   });
