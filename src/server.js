@@ -2,7 +2,8 @@ import express from 'express';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFileSync, appendFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { timingSafeEqual } from 'crypto';
+import { tmpdir, networkInterfaces, hostname } from 'os';
 import { readFile, writeFile, stat, rename, mkdir, rm, access, readdir } from 'fs/promises';
 import { join, dirname, relative, normalize, basename } from 'path';
 import { fileURLToPath } from 'url';
@@ -337,10 +338,110 @@ export function isAllowedPath(filePath, currentRoot) {
   return isInside(currentRoot, filePath);
 }
 
+// ---- アクセス制御 ---------------------------------------------------------
+// このサーバはローカルのファイルを読み書きする API を持つため、到達できる
+// = ファイルを触れる。以下 3 つを 1 つのミドルウェアで塞ぐ。
+//
+//  1. LAN モードの無認証アクセス  → トークン (loopback は従来どおり素通し)
+//  2. DNS rebinding              → Host ヘッダの検証
+//  3. 他サイトからの CSRF        → Origin ヘッダの検証
+//
+// Cookie の読み書きは依存を増やさないよう手書きで済ませる。
+
+const TOKEN_COOKIE = 'mdx_token';
+
+function parseCookies(header) {
+  const out = {};
+  for (const part of (header ?? '').split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/** 長さの違いも含めて一定時間で比較する。 */
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a ?? ''));
+  const bb = Buffer.from(String(b ?? ''));
+  return ba.length === bb.length && ba.length > 0 && timingSafeEqual(ba, bb);
+}
+
+function isLoopback(req) {
+  const ip = req.socket?.remoteAddress ?? '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+/** 'example.com:1234' / '[::1]:1234' → 'example.com' / '::1' */
+function hostnameOf(hostHeader) {
+  const h = String(hostHeader ?? '').trim().toLowerCase();
+  if (h.startsWith('[')) return h.slice(1, h.indexOf(']'));
+  return h.replace(/:\d+$/, '');
+}
+
+/** 自分に対する正当な宛先ホスト名の集合。 */
+function buildAllowedHosts(mode) {
+  const hosts = new Set(['localhost', '127.0.0.1', '::1']);
+  if (mode === 'lan') {
+    for (const ifaces of Object.values(networkInterfaces())) {
+      for (const iface of ifaces ?? []) {
+        if (!iface.internal) hosts.add(iface.address.toLowerCase());
+      }
+    }
+    hosts.add(String(hostname()).toLowerCase()); // マシン名でのアクセスも許す
+  }
+  return hosts;
+}
+
 // ---- Server factory -------------------------------------------------------
 
 export function createServer(meta = {}) {
   const app = express();
+
+  const authToken    = meta.authToken ?? null;   // LAN モード時のみ発行される
+  const allowedHosts = buildAllowedHosts(meta.mode);
+
+  // 認証・ホスト検証は静的配信も含めて全てに掛けるため最初に置く
+  app.use((req, res, next) => {
+    // 1. Host: 攻撃者のドメインが 127.0.0.1 に解決されても Host が違うので弾ける
+    if (!allowedHosts.has(hostnameOf(req.headers.host))) {
+      return res.status(403).type('text/plain').send('Forbidden: unexpected Host header');
+    }
+
+    // 2. Origin: 他サイトのページから叩かれた場合は Origin が付く。
+    //    アドレスバーからの通常の遷移には付かないので、付いていて不一致なら拒否。
+    const origin = req.headers.origin;
+    if (origin && origin !== 'null') {
+      let ok = false;
+      try { ok = allowedHosts.has(new URL(origin).hostname.toLowerCase()); } catch { ok = false; }
+      if (!ok) return res.status(403).type('text/plain').send('Forbidden: cross-origin request');
+    }
+
+    // 3. トークン (LAN モードのみ)。loopback は単一ユーザー想定なので従来どおり。
+    if (!authToken || isLoopback(req)) return next();
+
+    const cookies = parseCookies(req.headers.cookie);
+    if (safeEqual(cookies[TOKEN_COOKIE], authToken)) return next();
+
+    if (safeEqual(req.query?.token, authToken)) {
+      // 以降は Cookie で通す。URL からトークンを消すため GET はリダイレクトする
+      // (ブラウザ履歴やリファラにトークンを残さない)。
+      res.setHeader('Set-Cookie',
+        `${TOKEN_COOKIE}=${authToken}; Path=/; HttpOnly; SameSite=Strict`);
+      if (req.method === 'GET') {
+        const u = new URL(req.originalUrl, 'http://localhost');
+        u.searchParams.delete('token');
+        return res.redirect(302, u.pathname + (u.search || ''));
+      }
+      return next();
+    }
+
+    res.status(401).type('text/plain').send(
+      'Unauthorized: このサーバは LAN 公開モードです。' +
+      'サーバ起動時に表示された ?token=... 付きの URL からアクセスしてください。'
+    );
+  });
+
   app.use(express.json({ limit: '10mb' }));
 
   // Static public files

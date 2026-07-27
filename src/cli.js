@@ -2,6 +2,7 @@
 import { join, resolve } from 'path';
 import { networkInterfaces, tmpdir, homedir } from 'os';
 import { existsSync, statSync, createWriteStream } from 'fs';
+import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { createServer } from './server.js';
 import { loadConfig, loadLocalConfig, serverConfig, getConfigPaths, getConfig } from './configManager.js';
@@ -38,6 +39,10 @@ async function main() {
   //   例) fastmd-explorer C:\docs   /   fastmd-explorer https://example.com/README.md
   const { initialRoot, initialUrl } = parseTargetArg(process.argv[2]);
 
+  // LAN 公開時だけアクセストークンを発行する。
+  // ローカル (127.0.0.1) からは従来どおりトークン無しで開ける。
+  const authToken = MODE === 'lan' ? randomBytes(16).toString('hex') : null;
+
   const startedAt = Date.now();
   const { localConfigPath, globalConfigPath } = getConfigPaths();
   const app = createServer({
@@ -45,6 +50,7 @@ async function main() {
     localConfigPath, globalConfigPath,
     windowMode: WINDOW_MODE,
     initialRoot, initialUrl,
+    authToken,
     onIdle: () => process.exit(0),
   });
 
@@ -54,10 +60,11 @@ async function main() {
     console.log(`  local  →  ${local}`);
 
     if (MODE === 'lan') {
-      console.log('\n  ⚠  LAN モード: ネットワーク上の全デバイスからアクセス可能です');
+      console.log('\n  ⚠  LAN モード: 下記 URL (トークン付き) を知る端末からアクセスできます');
       getLanAddresses().forEach((ip) => {
-        console.log(`  lan    →  http://${ip}:${PORT}`);
+        console.log(`  lan    →  http://${ip}:${PORT}/?token=${authToken}`);
       });
+      console.log('\n  ※ トークンは起動のたびに変わります。URL の共有先にご注意ください。');
     }
 
     console.log();
