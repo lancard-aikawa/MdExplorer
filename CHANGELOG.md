@@ -7,6 +7,11 @@
 
 ## [未リリース]
 
+## [1.7.1] - 2026-07-24
+
+### 修正
+- 外部でファイルが更新されても古い表示のままになる問題を修正。更新ボタン（`↺` / `Ctrl+R`）でツリーの再スキャンに加えて開いているファイルも再描画するようにし、`/api/preview`・`/api/image`・`/api/file` に `Cache-Control: no-store` を付与してブラウザキャッシュ由来の古い内容（特に画像）が出ないようにした。
+
 ## [1.7.0] - 2026-07-23
 
 ### 追加
@@ -104,7 +109,8 @@
   - 設定パネル・ステータスバー
   - 単一 exe ビルド (@yao-pkg/pkg + esbuild)、pnpm 化
 
-[未リリース]: https://github.com/lancard-aikawa/fastmd-explorer/compare/v1.7.0...HEAD
+[未リリース]: https://github.com/lancard-aikawa/fastmd-explorer/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/lancard-aikawa/fastmd-explorer/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/lancard-aikawa/fastmd-explorer/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/lancard-aikawa/fastmd-explorer/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/lancard-aikawa/fastmd-explorer/compare/v1.5.1...v1.5.2

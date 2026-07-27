@@ -2863,6 +2863,12 @@ function bindEvents() {
     if (!state.currentRoot) return;
     await post('/api/refresh');
     await refreshTree();
+    // 開いているファイルも再描画し、外部で更新された内容を反映する。
+    // 編集中は入力を失わないよう触らない。
+    if (!state.isEditing) {
+      const tab = activeTab();
+      if (tab) await renderFileContent(tab);
+    }
   };
   btnRefresh.addEventListener('click', doTreeRefresh);
   btnTreeRefresh.addEventListener('click', doTreeRefresh);

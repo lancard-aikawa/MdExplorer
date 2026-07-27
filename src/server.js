@@ -559,6 +559,7 @@ export function createServer(meta = {}) {
     if (!imgPath || !isAllowedPath(imgPath, currentRoot))
       return res.status(403).send('Forbidden');
     try {
+      res.setHeader('Cache-Control', 'no-store'); // 画像は URL が同一なのでブラウザキャッシュで古い版が出やすい
       res.sendFile(imgPath);
     } catch (err) { res.status(404).send('Not found'); }
   });
@@ -579,6 +580,7 @@ export function createServer(meta = {}) {
     if (!filePath || !isAllowedPath(filePath, currentRoot)) {
       return res.status(403).json({ error: '不正なパスです' });
     }
+    res.setHeader('Cache-Control', 'no-store'); // 外部更新後の再取得でブラウザキャッシュの古い内容を出さない
     try {
       const fileStat = await stat(filePath);
       const content = await readFile(filePath, 'utf8');
@@ -632,6 +634,7 @@ export function createServer(meta = {}) {
     if (!filePath || !isAllowedPath(filePath, currentRoot)) {
       return res.status(403).json({ error: '不正なパスです' });
     }
+    res.setHeader('Cache-Control', 'no-store'); // 編集開始時に外部更新後の最新内容を読むため
     try {
       const content = await readFile(filePath, 'utf8');
       res.json({ content });
