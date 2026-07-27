@@ -1,7 +1,8 @@
 import { readdir, stat, readlink, readFile, writeFile, mkdir, unlink } from 'fs/promises';
-import { join, relative, extname, resolve } from 'path';
+import { join, relative, extname, resolve, dirname } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import { isInside } from './pathGuard.js';
 
 // In-memory file tree cache keyed by root path
 // Entry: { mtime: number, tree: TreeNode | null }
@@ -10,6 +11,11 @@ const treeCache = new Map();
 // In-memory rendered HTML cache keyed by absolute file path
 // Entry: { mtime: number, html: string }
 const htmlCache = new Map();
+
+// キャッシュ上限。無制限だとプロセスを開きっぱなしにしたときに増え続ける。
+// tree はルート単位なので履歴 (MAX_HISTORY=20) より少し多め、html はファイル単位。
+const HTML_CACHE_MAX = 200;
+const TREE_CACHE_MAX = 24;
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '__pycache__', 'dist', 'build', '.next', '.nuxt']);
 const MD_EXTS    = new Set(['.md', '.markdown', '.mdown', '.mkd']);
@@ -23,7 +29,11 @@ const SCHEMA_VERSION = 2;
 const TREE_CACHE_DIR = join(homedir(), '.mdexplorer', 'tree-cache');
 
 function diskCachePath(rootPath) {
-  const key = rootPath.toLowerCase().replace(/\\/g, '/');
+  // 大文字小文字を潰してよいのはパスが case-insensitive な環境だけ。
+  // Linux で潰すと /docs と /Docs が同じキャッシュを共有し、別フォルダの
+  // ツリーが表示されてしまう。
+  const norm = rootPath.replace(/\\/g, '/');
+  const key = process.platform === 'win32' ? norm.toLowerCase() : norm;
   const hash = createHash('sha1').update(key).digest('hex');
   return join(TREE_CACHE_DIR, hash + '.json');
 }
@@ -85,7 +95,9 @@ export async function scanMarkdownFiles(rootPath) {
   });
 
   const result = { version: SCHEMA_VERSION, mtime: rootStat.mtimeMs, tree, fileCount, warnings };
+  treeCache.delete(rootPath);
   treeCache.set(rootPath, result);
+  while (treeCache.size > TREE_CACHE_MAX) treeCache.delete(treeCache.keys().next().value);
   saveDiskCache(rootPath, result);   // persist for next server start
   return { tree, fileCount, warnings };
 }
@@ -112,9 +124,12 @@ async function scanDir(dirPath, rootPath, originalRoot, warnings, onFile) {
     if (entry.isSymbolicLink()) {
       // Resolve symlink and check if it crosses root boundary
       try {
-        const resolved = resolve(await readlink(fullPath));
-        const rel = relative(originalRoot, resolved);
-        if (rel.startsWith('..') || rel.startsWith('/')) {
+        // readlink は相対パスを返しうる。リンク自身の位置を基準に解決する
+        // (resolve() だけだと process.cwd() 基準になり別の場所を指してしまう)。
+        const resolved = resolve(dirname(fullPath), await readlink(fullPath));
+        // 包含判定は API のパス検証と同じ実装を使う。
+        // 素朴な startsWith('..') では別ドライブのリンク先を見逃す。
+        if (!isInside(originalRoot, resolved)) {
           warnings.push(`シンボリックリンクがルート外を指しています: ${relative(originalRoot, fullPath)} → ${resolved}`);
         }
       } catch { /* ignore unresolvable symlinks */ }
@@ -179,12 +194,21 @@ export function invalidateCache(rootPath, { hard = false } = {}) {
 
 /** Store rendered HTML in cache */
 export function setCachedHtml(filePath, mtime, html) {
+  // Map は挿入順を保つので、あふれたら最も古いキーから捨てる (簡易 LRU)。
+  // 上限が無いと大きなフォルダを一通り開いただけで HTML が積み上がり続ける。
+  htmlCache.delete(filePath);
   htmlCache.set(filePath, { mtime, html });
+  while (htmlCache.size > HTML_CACHE_MAX) {
+    htmlCache.delete(htmlCache.keys().next().value);
+  }
 }
 
 /** Retrieve cached HTML if mtime matches */
 export function getCachedHtml(filePath, mtime) {
   const cached = htmlCache.get(filePath);
-  if (cached && cached.mtime === mtime) return cached.html;
-  return null;
+  if (!cached || cached.mtime !== mtime) return null;
+  // 参照されたものを末尾へ移して、よく見るファイルが先に捨てられないようにする
+  htmlCache.delete(filePath);
+  htmlCache.set(filePath, cached);
+  return cached.html;
 }

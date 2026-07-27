@@ -1,7 +1,8 @@
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import { join, normalize } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import { writeJsonAtomic } from './jsonStore.js';
 
 // Tags are stored in ~/.mdexplorer/tags/{hash}.json
 // where hash = SHA1 of the normalized root path (lowercase, forward slashes)
@@ -9,6 +10,9 @@ import { createHash } from 'crypto';
 
 const TAGS_DIR = join(homedir(), '.mdexplorer', 'tags');
 
+// 注: case-sensitive な環境では /docs と /Docs が同じファイルを共有するが、
+// ここは意図的に変えていない。ハッシュを変えると既存ユーザーのタグが
+// 保存先ごと迷子になるため (ツリーキャッシュと違って作り直せないデータ)。
 function rootHash(rootPath) {
   const key = normalize(rootPath).toLowerCase().replace(/\\/g, '/');
   return createHash('sha1').update(key).digest('hex');
@@ -42,8 +46,7 @@ export async function loadTags(rootPath) {
 }
 
 export async function saveTags(rootPath, tags) {
-  await mkdir(TAGS_DIR, { recursive: true });
-  await writeFile(tagsFile(rootPath), JSON.stringify(tags, null, 2), 'utf8');
+  await writeJsonAtomic(tagsFile(rootPath), tags);
 }
 
 export async function renameFileTags(rootPath, oldRelative, newRelative) {
@@ -69,8 +72,14 @@ export async function renameFileTags(rootPath, oldRelative, newRelative) {
 export async function updateFileTags(rootPath, relativePath, patch) {
   const tags = await loadTags(rootPath);
   const current = tags[relativePath] ?? { tags: [], flagged: false, note: '' };
-  tags[relativePath] = { ...current, ...patch };
-  const entry = tags[relativePath];
+  // undefined のキーは「変更なし」として無視する。
+  // 呼び出し元は { tags, flagged, note } を常に 3 キーで渡すため、
+  // そのまま spread すると送られなかった項目が undefined で上書きされ、
+  // 直後の entry.tags.length で TypeError になっていた。
+  const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+  const entry = { ...current, ...clean };
+  if (!Array.isArray(entry.tags)) entry.tags = [];
+  tags[relativePath] = entry;
   if (!entry.flagged && entry.tags.length === 0 && !entry.note) {
     delete tags[relativePath];
   }

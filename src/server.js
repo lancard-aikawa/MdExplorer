@@ -1,9 +1,10 @@
 import express from 'express';
-import { execSync, execFileSync } from 'child_process';
+import { exec, execFile } from 'child_process';
+import { promisify } from 'util';
 import { readFileSync, appendFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { readFile, writeFile, stat, rename, mkdir, rm, access, readdir } from 'fs/promises';
-import { join, dirname, relative, normalize, resolve, isAbsolute, basename } from 'path';
+import { join, dirname, relative, normalize, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { marked } from 'marked';
 import { markedHighlight } from 'marked-highlight';
@@ -16,10 +17,14 @@ import {
   setCachedHtml,
 } from './fileScanner.js';
 import { loadTags, updateFileTags, renameFileTags } from './tagManager.js';
+import { isInside } from './pathGuard.js';
 import { getConfig, addFolderToHistory, addUrlToHistory, serverConfig, saveWindowBounds } from './configManager.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = dirname(__dirname);
+
+const execAsync     = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // ---- Marked setup --------------------------------------------------------
 
@@ -327,30 +332,9 @@ function detectFsCrossing(targetPath) {
 
 // ---- Security helper -----------------------------------------------------
 
-/**
- * filePath が currentRoot の中に収まっているか判定する。
- *
- * 重要: Windows の path.relative() は「ドライブが違うと相対パスを作れず、
- * 引数をそのまま返す」。つまり relative('C:\\root', 'D:\\Windows\\win.ini')
- * は 'D:\\Windows\\win.ini' になる。先頭が '..' でも区切り文字でもないため、
- * 素朴な startsWith('..') チェックだけでは別ドライブが素通りしてしまう。
- * そこで isAbsolute() で明示的に弾く。
- *
- * 併せて resolve() を通し、相対パス (cwd 依存) や '.' / '..' 混じりの
- * 入力も正規化してから比較する。
- */
+/** filePath が currentRoot の中に収まっているか。判定の実体は pathGuard.js。 */
 export function isAllowedPath(filePath, currentRoot) {
-  if (!currentRoot || !filePath) return false;
-  let rel;
-  try {
-    rel = relative(resolve(currentRoot), resolve(filePath));
-  } catch {
-    return false;
-  }
-  if (rel === '') return true;        // ルート自身
-  if (isAbsolute(rel)) return false;  // 別ドライブ / 別 UNC 共有
-  // 区切りは環境で '\\' / '/' が混じりうるので両方で分割して先頭要素を見る
-  return rel.split(/[\\/]/)[0] !== '..';
+  return isInside(currentRoot, filePath);
 }
 
 // ---- Server factory -------------------------------------------------------
@@ -810,10 +794,17 @@ export function createServer(meta = {}) {
     );
 
     const links = [];
+    // 被参照はファイルを開くたびに全ツリーを走査する。ツリーを矢印キーで
+    // 素早く辿ると走査が積み上がるので、クライアントが離れたら止める。
+    let aborted = false;
+    req.on('close', () => { aborted = true; });
+
     async function walk(dir) {
+      if (aborted) return;
       let entries;
       try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
       for (const entry of entries) {
+        if (aborted) return;
         if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
         const fullPath = join(dir, entry.name);
         if (entry.isDirectory()) { await walk(fullPath); continue; }
@@ -839,8 +830,8 @@ export function createServer(meta = {}) {
     }
     try {
       await walk(currentRoot);
-      res.json({ links });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+      if (!aborted) res.json({ links });
+    } catch (err) { if (!aborted) res.status(500).json({ error: err.message }); }
   });
 
   // GET /api/search?q=...  (SSE: progress + results streaming)
@@ -863,12 +854,17 @@ export function createServer(meta = {}) {
     let scanned = 0;
     let found = 0;
 
+    // クライアントは入力のたびに EventSource を張り替える (400ms デバウンス)。
+    // 中断を見ないと、捨てられた検索がフルツリー走査を続けたまま何本も並走する。
+    let aborted = false;
+    req.on('close', () => { aborted = true; });
+
     async function walk(dir) {
-      if (found >= MAX_FILES) return;
+      if (aborted || found >= MAX_FILES) return;
       let entries;
       try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
       for (const entry of entries) {
-        if (found >= MAX_FILES) break;
+        if (aborted || found >= MAX_FILES) break;
         if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
         const fullPath = join(dir, entry.name);
         if (entry.isDirectory()) {
@@ -898,9 +894,9 @@ export function createServer(meta = {}) {
 
     try {
       await walk(currentRoot);
-      send({ type: 'done', scanned, found, truncated: found >= MAX_FILES });
+      if (!aborted) send({ type: 'done', scanned, found, truncated: found >= MAX_FILES });
     } catch (err) {
-      send({ type: 'error', message: err.message });
+      if (!aborted) send({ type: 'error', message: err.message });
     }
     res.end();
   });
@@ -912,8 +908,8 @@ export function createServer(meta = {}) {
   });
 
   // POST /api/folder/pick  — open native OS folder picker, return selected path
-  app.post('/api/folder/pick', (_req, res) => {
-    const path = pickFolderNative();
+  app.post('/api/folder/pick', async (_req, res) => {
+    const path = await pickFolderNative();
     res.json({ path }); // null if cancelled
   });
 
@@ -1076,6 +1072,16 @@ export function createServer(meta = {}) {
     }
   });
 
+  // 全ルートの後に置くエラーハンドラ (4 引数にしないと express が認識しない)。
+  // 既定のハンドラは HTML のスタックトレースを返し、node_modules の絶対パスまで
+  // 露出する。LAN モードだと外から丸見えになるのでログに落として JSON だけ返す。
+  app.use((err, _req, res, _next) => {
+    console.error('[error]', err?.stack ?? err);
+    if (res.headersSent) return;
+    res.status(err?.status ?? err?.statusCode ?? 500)
+       .json({ error: err?.message ?? 'サーバエラーが発生しました' });
+  });
+
   return app;
 }
 
@@ -1090,11 +1096,11 @@ function pickerLog(...parts) {
   } catch { /* ignore */ }
 }
 
-function pickFolderNative() {
+async function pickFolderNative() {
   try {
-    if (process.platform === 'win32') return pickFolderWindows();
-    if (process.platform === 'darwin') return pickFolderMac();
-    return pickFolderLinux();
+    if (process.platform === 'win32') return await pickFolderWindows();
+    if (process.platform === 'darwin') return await pickFolderMac();
+    return await pickFolderLinux();
   } catch (err) {
     pickerLog('ERROR', err?.message ?? String(err));
     if (err?.stderr) pickerLog('STDERR', String(err.stderr));
@@ -1103,7 +1109,10 @@ function pickFolderNative() {
   }
 }
 
-function pickFolderWindows() {
+// 非同期 (execFile) で起動する。同期版 (execFileSync) だとダイアログを開いている
+// 最大 2 分間 Node のイベントループが完全に止まり、ハートビート SSE を含む
+// 全リクエストが待たされる。呼び出し側はレスポンスを待つだけなので await で十分。
+async function pickFolderWindows() {
   // src/picker.ps1 で IFileOpenDialog (Vista+ モダンエクスプローラ) を起動。
   //
   // pkg でパッケージ化すると picker.ps1 は仮想スナップショット内 (C:\snapshot\...)
@@ -1111,10 +1120,10 @@ function pickFolderWindows() {
   // そこで内容を読み取り (スナップショット内なら fs で読める)、
   // base64(UTF-16LE) エンコードして -EncodedCommand で直接渡す。
   //
-  // 重要: execSync ではなく execFileSync を使う。
-  // execSync は cmd.exe 経由で実行され、cmd のコマンドライン長上限 (約 8191 文字)
+  // 重要: exec ではなく execFile を使う。
+  // exec は cmd.exe 経由で実行され、cmd のコマンドライン長上限 (約 8191 文字)
   // に -EncodedCommand (base64) が引っ掛かり "The command line is too long" で失敗する。
-  // execFileSync はシェルを介さず CreateProcess で直接起動するため上限が 32767 文字になる。
+  // execFile はシェルを介さず CreateProcess で直接起動するため上限が 32767 文字になる。
   //
   // また、コンソール窓を隠す指定 (windowsHide:true / -WindowStyle Hidden) は使わない。
   // いずれもフォルダ選択ダイアログまで隠す/即閉じさせてしまうため
@@ -1123,24 +1132,25 @@ function pickFolderWindows() {
   const ps1     = join(__dirname, 'picker.ps1');
   const script  = readFileSync(ps1, 'utf8');
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  const result  = execFileSync(
+  const { stdout } = await execFileAsync(
     'powershell.exe',
     ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
     { encoding: 'utf8', timeout: 120_000 }
-  ).trim();
-  return result || null;
+  );
+  return stdout.trim() || null;
 }
 
-function pickFolderMac() {
-  const result = execSync(
+async function pickFolderMac() {
+  const { stdout } = await execAsync(
     `osascript -e 'POSIX path of (choose folder with prompt "フォルダを選択してください")'`,
     { encoding: 'utf8', timeout: 120_000 }
-  ).trim();
+  );
   // osascript は末尾に / を付けるので除去
+  const result = stdout.trim();
   return result ? result.replace(/\/$/, '') : null;
 }
 
-function pickFolderLinux() {
+async function pickFolderLinux() {
   // zenity → kdialog → yad の順で試す
   const candidates = [
     `zenity --file-selection --directory --title="フォルダを選択"`,
@@ -1149,7 +1159,8 @@ function pickFolderLinux() {
   ];
   for (const cmd of candidates) {
     try {
-      return execSync(cmd, { encoding: 'utf8', timeout: 120_000 }).trim() || null;
+      const { stdout } = await execAsync(cmd, { encoding: 'utf8', timeout: 120_000 });
+      return stdout.trim() || null;
     } catch { /* 次を試す */ }
   }
   return null;

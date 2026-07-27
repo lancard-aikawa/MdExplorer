@@ -1,6 +1,7 @@
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { writeJsonAtomic } from './jsonStore.js';
 
 // Global user data (history, last folder)
 const GLOBAL_DIR  = join(homedir(), '.mdexplorer');
@@ -55,8 +56,7 @@ export async function loadConfig() {
 
 export async function saveConfig(config) {
   _global = config;
-  await mkdir(GLOBAL_DIR, { recursive: true });
-  await writeFile(GLOBAL_FILE, JSON.stringify(config, null, 2), 'utf8');
+  await writeJsonAtomic(GLOBAL_FILE, config);
 }
 
 export async function addFolderToHistory(folderPath) {
