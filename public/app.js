@@ -236,6 +236,9 @@ async function browseFolder() {
 async function openFolder(rawPath) {
   const path = rawPath.trim();
   if (!path) return;
+  // 確認は POST /api/folder より前に行う。後ろでキャンセルすると
+  // サーバ側の currentRoot だけ切り替わって画面と食い違う。
+  if (!confirmDiscardDirty()) return;
   showWarning('', '');
   try {
     // Save current workspace (folder or url) before switching
@@ -323,6 +326,8 @@ function restoreWorkspaceTabs(saved) {
 /** トグルボタン: 現ワークスペースを退避し、もう一方を復元する (再オープンはしない)。 */
 async function switchMode(newMode) {
   if (newMode === state.mode) return;
+  // applyModeUI より前に確認する (キャンセル時にトグルの見た目を動かさないため)
+  if (!confirmDiscardDirty()) return;
   saveTabState(workspaceKey());
   applyModeUI(newMode);
 
@@ -370,7 +375,9 @@ async function openUrl(rawUrl) {
   showWarning('', '');
 
   // フォルダモードから来たら現ワークスペースを退避し URLワークスペースへ
+  // (このときフォルダ側の未保存編集が捨てられるので確認する)
   if (state.mode !== 'url') {
+    if (!confirmDiscardDirty()) return;
     saveTabState(workspaceKey());
     applyModeUI('url');
     restoreWorkspaceTabs(loadTabState('__url__'));
@@ -436,6 +443,27 @@ function fixRemoteLinks() {
       }
     });
   });
+}
+
+/**
+ * リモート (URLモード) の HTML をサニタイズする。
+ *
+ * ローカルフォルダの md は「自分のファイル」なので生 HTML をそのまま活かすが、
+ * リモートの md は信頼できない。サーバから受け取った HTML はアプリと同一オリジンの
+ * previewContent へ流し込むため、ここで script / on* / javascript: を落とす。
+ * これを通さないと、悪意ある md を 1 つ開くだけで /api/file や /api/fs を
+ * アプリの権限で叩けてしまう。
+ *
+ * DOMPurify が読めていない場合は生 HTML を描画せず例外にする (fail-closed)。
+ * 呼び出し元の catch がエラー表示するので、サニタイズ無しで表示されることはない。
+ */
+function sanitizeRemoteHtml(html) {
+  if (typeof DOMPurify === 'undefined' || typeof DOMPurify.sanitize !== 'function') {
+    throw new Error('サニタイザ (DOMPurify) を読み込めませんでした。安全のため表示を中止しました');
+  }
+  // 既定プロファイルは HTML + SVG + MathML を許可する。
+  // KaTeX の MathML 出力も mermaid の <div class="mermaid"> もそのまま通る。
+  return DOMPurify.sanitize(html);
 }
 
 /** URLモードのファイル情報バー (Last-Modified / 文字数 / 見出し数)。 */
@@ -969,9 +997,25 @@ async function closeTab(path) {
   }
 }
 
+/** 未保存の編集を持つタブが 1 つでもあるか。 */
+function hasDirtyTabs() {
+  return state.tabs.some((t) => state.tabDirty[t.path]);
+}
+
+/**
+ * ワークスペースを切り替える前の破棄確認。続行してよければ true。
+ *
+ * フォルダ/モード切替は tabDirty・tabEditorText をまとめて捨てる。
+ * saveTabState が localStorage へ残すのはタブの一覧だけで編集テキストは
+ * どこにも保存されないため、捨てる前に必ずここを通す。
+ */
+function confirmDiscardDirty() {
+  if (!hasDirtyTabs()) return true;
+  return confirm('未保存の変更があります。破棄して切り替えますか？');
+}
+
 function closeAllTabs() {
-  const hasDirty = state.tabs.some((t) => state.tabDirty[t.path]);
-  if (hasDirty && !confirm('未保存の変更があるタブがあります。全て閉じますか？')) return;
+  if (hasDirtyTabs() && !confirm('未保存の変更があるタブがあります。全て閉じますか？')) return;
   state.tabs = [];
   state.activeTabPath = null;
   state.tabDirty = {};
@@ -1027,7 +1071,7 @@ async function renderFileContent(tab, highlight = null) {
     fileInfoBar.textContent = '';
     try {
       const { html, charCount, lastModified } = await get(`/api/url/preview?url=${encodeURIComponent(tab.path)}`);
-      previewContent.innerHTML = html;
+      previewContent.innerHTML = sanitizeRemoteHtml(html);
       previewPanel.scrollTop = 0;
       await renderMermaid();
       fixRemoteLinks();
@@ -2983,6 +3027,14 @@ function bindEvents() {
   });
 
   document.addEventListener('keydown', handleKey);
+
+  // ウィンドウを閉じる操作でも未保存の編集を守る。
+  // window モードは閉じるとサーバごと終了するため、ここで止めないと復帰できない。
+  window.addEventListener('beforeunload', (e) => {
+    if (!hasDirtyTabs()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
 
   initResize();
   initOutlineResize();

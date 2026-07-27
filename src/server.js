@@ -3,7 +3,7 @@ import { execSync, execFileSync } from 'child_process';
 import { readFileSync, appendFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { readFile, writeFile, stat, rename, mkdir, rm, access, readdir } from 'fs/promises';
-import { join, dirname, relative, normalize } from 'path';
+import { join, dirname, relative, normalize, resolve, isAbsolute, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { marked } from 'marked';
 import { markedHighlight } from 'marked-highlight';
@@ -39,7 +39,11 @@ marked.use({
   renderer: {
     code(code, lang) {
       if (lang === 'mermaid') {
-        return `<div class="mermaid">${code}</div>\n`;
+        // code は未エスケープの生テキスト。そのまま埋めると </div> で脱出できる。
+        // mermaid.run() は要素の innerHTML を読んでから entityDecode() する
+        // (escape → &,#,; だけ復元 → innerHTML/textContent → unescape) ので、
+        // ここでエスケープしても図のソースは元通り復元される。
+        return `<div class="mermaid">${escHtml(code)}</div>\n`;
       }
       return false;
     },
@@ -74,8 +78,15 @@ marked.use({
 // サーバ側でレンダリングするため、表示には KaTeX CSS とフォント (/vendor) が必要。
 marked.use(markedKatex({ throwOnError: false }));
 
+// 属性値の中でも使う (wikilink の href など) ため、クォートまでエスケープする。
+// " を落とすと [[a" onmouseover="alert(1)]] のような入力で属性を生やされる。
 function escHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ---- Front matter (YAML ヘッダー) -----------------------------------------
@@ -316,10 +327,30 @@ function detectFsCrossing(targetPath) {
 
 // ---- Security helper -----------------------------------------------------
 
-function isAllowedPath(filePath, currentRoot) {
-  if (!currentRoot) return false;
-  const rel = relative(currentRoot, normalize(filePath));
-  return !rel.startsWith('..') && !rel.startsWith('/') && !rel.startsWith('\\');
+/**
+ * filePath が currentRoot の中に収まっているか判定する。
+ *
+ * 重要: Windows の path.relative() は「ドライブが違うと相対パスを作れず、
+ * 引数をそのまま返す」。つまり relative('C:\\root', 'D:\\Windows\\win.ini')
+ * は 'D:\\Windows\\win.ini' になる。先頭が '..' でも区切り文字でもないため、
+ * 素朴な startsWith('..') チェックだけでは別ドライブが素通りしてしまう。
+ * そこで isAbsolute() で明示的に弾く。
+ *
+ * 併せて resolve() を通し、相対パス (cwd 依存) や '.' / '..' 混じりの
+ * 入力も正規化してから比較する。
+ */
+export function isAllowedPath(filePath, currentRoot) {
+  if (!currentRoot || !filePath) return false;
+  let rel;
+  try {
+    rel = relative(resolve(currentRoot), resolve(filePath));
+  } catch {
+    return false;
+  }
+  if (rel === '') return true;        // ルート自身
+  if (isAbsolute(rel)) return false;  // 別ドライブ / 別 UNC 共有
+  // 区切りは環境で '\\' / '/' が混じりうるので両方で分割して先頭要素を見る
+  return rel.split(/[\\/]/)[0] !== '..';
 }
 
 // ---- Server factory -------------------------------------------------------
@@ -338,6 +369,10 @@ export function createServer(meta = {}) {
   // Vendor: cytoscape UMD bundle (リンク図の力学レイアウト描画用)
   app.get('/vendor/cytoscape.min.js', (_req, res) => {
     res.sendFile(join(ROOT_DIR, 'node_modules', 'cytoscape', 'dist', 'cytoscape.min.js'));
+  });
+  // Vendor: DOMPurify (URLモードで取得したリモート md のサニタイズ用)
+  app.get('/vendor/purify.min.js', (_req, res) => {
+    res.sendFile(join(ROOT_DIR, 'node_modules', 'dompurify', 'dist', 'purify.min.js'));
   });
   // Vendor: highlight.js CSS themes
   app.get('/vendor/hljs-light.css', (_req, res) => {
@@ -605,11 +640,16 @@ export function createServer(meta = {}) {
     const { base64, filename, dir } = req.body ?? {};
     if (!base64 || !filename || !dir) return res.status(400).json({ error: 'base64 / filename / dir が必要です' });
     if (!isAllowedPath(normalize(dir), currentRoot)) return res.status(403).json({ error: '不正なパスです' });
+    // filename にディレクトリ成分を持たせない。拡張子チェックだけだと
+    // '../../evil.png' が通り、dir の検証を迂回してルート外へ書けてしまう。
+    const safeName = basename(filename);
     // Only allow image extensions
-    if (!/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(filename)) return res.status(400).json({ error: '画像ファイルのみ対応です' });
+    if (!/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(safeName)) return res.status(400).json({ error: '画像ファイルのみ対応です' });
+    const savePath = join(normalize(dir), safeName);
+    // basename 後も join 結果を検証する (dir と結合して初めて確定するため)
+    if (!isAllowedPath(savePath, currentRoot)) return res.status(403).json({ error: '不正なパスです' });
     try {
       const data = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ''), 'base64');
-      const savePath = join(normalize(dir), filename);
       await writeFile(savePath, data);
       res.json({ path: savePath, relativePath: relative(currentRoot, savePath).replace(/\\/g, '/') });
     } catch (err) { res.status(500).json({ error: err.message }); }

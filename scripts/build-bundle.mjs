@@ -33,6 +33,7 @@ const pkgrc = {
     '../public/**/*',
     '../node_modules/mermaid/dist/mermaid.min.js',
     '../node_modules/cytoscape/dist/cytoscape.min.js',
+    '../node_modules/dompurify/dist/purify.min.js',
     '../node_modules/highlight.js/styles/github.css',
     '../node_modules/highlight.js/styles/github-dark.css',
     '../node_modules/katex/dist/katex.min.css',
